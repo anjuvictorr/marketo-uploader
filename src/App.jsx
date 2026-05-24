@@ -141,6 +141,7 @@ function FieldMapping({ csvHeaders, marketoFields, mapping, onChange }) {
   }, []); // intentionally empty — run once on mount
 
   const unmapped = csvHeaders.filter(h => !mapping[h]);
+  const emailMapped = Object.values(mapping).includes("email");
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -152,6 +153,11 @@ function FieldMapping({ csvHeaders, marketoFields, mapping, onChange }) {
           </span>
         )}
       </div>
+      {!emailMapped && (
+        <div style={{ background: "#2a0f0f", border: `1px solid ${T.danger}66`, borderRadius: 10, padding: "10px 14px", fontSize: 13, color: T.danger, fontWeight: 600 }}>
+          Email is required — map a column to the <strong>email</strong> field to continue. Marketo uses email to match existing records and avoid duplicates.
+        </div>
+      )}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 24px 1fr", gap: "8px 12px", alignItems: "center" }}>
         <div style={{ fontSize: 11, color: T.muted, textTransform: "uppercase", letterSpacing: "0.05em" }}>CSV column</div>
         <div />
@@ -159,11 +165,12 @@ function FieldMapping({ csvHeaders, marketoFields, mapping, onChange }) {
         {csvHeaders.map(h => {
           const mapped = mapping[h] || "";
           const isUnmapped = !mapped;
+          const isEmail = mapped === "email";
           return [
-            <div key={`csv-${h}`} style={{ background: "#0f0f13", border: `1px solid ${isUnmapped ? T.coral + "66" : T.cardBorder}`, borderRadius: 8, padding: "9px 12px", fontSize: 13, color: isUnmapped ? T.coral : T.text }}>{h}</div>,
+            <div key={`csv-${h}`} style={{ background: "#0f0f13", border: `1px solid ${isEmail ? T.neon + "88" : isUnmapped ? T.coral + "66" : T.cardBorder}`, borderRadius: 8, padding: "9px 12px", fontSize: 13, color: isUnmapped ? T.coral : T.text }}>{h}</div>,
             <div key={`arr-${h}`} style={{ textAlign: "center", color: mapped ? T.neon : T.coral, fontSize: 16 }}>{mapped ? "→" : "⚠"}</div>,
             <select key={`sel-${h}`} value={mapped} onChange={e => onChange({ ...mapping, [h]: e.target.value })}
-              style={{ ...inp, border: `1px solid ${isUnmapped ? T.coral + "66" : T.cardBorder}`, color: mapped ? T.text : T.muted }}>
+              style={{ ...inp, border: `1px solid ${isEmail ? T.neon + "88" : isUnmapped ? T.coral + "66" : T.cardBorder}`, color: mapped ? T.text : T.muted }}>
               <option value="">— skip this field —</option>
               {marketoFields.map(f => <option key={f.rest} value={f.rest}>{f.display} ({f.rest})</option>)}
             </select>,
@@ -325,6 +332,11 @@ function UploadPanel({ settings, onLogEntry, onErrorEntry }) {
 
     if (mappedRows.length === 0) {
       setUploadError("No mapped fields — please map at least one CSV column to a Marketo field.");
+      setUploading(false);
+      return;
+    }
+    if (!Object.values(mapping).includes("email")) {
+      setUploadError("Email field is required. Go back to field mapping and map a column to 'email'.");
       setUploading(false);
       return;
     }
@@ -510,7 +522,13 @@ function UploadPanel({ settings, onLogEntry, onErrorEntry }) {
           <p style={{ margin: "0 0 16px", fontSize: 13, color: T.muted }}>Auto-matched where possible. Fix any flagged columns.</p>
           <FieldMapping csvHeaders={csvData.headers} marketoFields={marketoFields} mapping={mapping} onChange={setMapping} />
           <div style={{ marginTop: 16 }}>
-            <button onClick={() => setStep(4)} style={btn(T.yellow)}>Confirm mapping → Review upload</button>
+            <button
+              onClick={() => setStep(4)}
+              disabled={!Object.values(mapping).includes("email")}
+              style={{ ...btn(T.yellow), opacity: Object.values(mapping).includes("email") ? 1 : 0.4, cursor: Object.values(mapping).includes("email") ? "pointer" : "not-allowed" }}
+            >
+              Confirm mapping → Review upload
+            </button>
           </div>
         </div>
       )}
