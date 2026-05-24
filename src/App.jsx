@@ -422,12 +422,23 @@ function UploadPanel({ settings, onLogEntry, onErrorEntry }) {
       processed += pollResult.imported;
       if (!pollResult.ok || pollResult.failed > 0) {
         hasError = true;
-        newErrors.push({
-          id: `err_${Date.now()}_${i}`, uploadId: logId, listName: file.name, batchIndex: i + 1,
-          errorCode: pollResult.timeout ? "TIMEOUT" : "PARTIAL_FAILURE",
-          message: pollResult.timeout ? "Job timed out after 5 minutes" : `${pollResult.failed} records failed in batch ${i + 1}`,
-          timestamp: new Date().toISOString(),
-        });
+        if (pollResult.timeout) {
+          newErrors.push({ id: `err_${Date.now()}_${i}`, uploadId: logId, listName: file.name, batchIndex: i + 1, errorCode: "TIMEOUT", leadId: "", email: "", message: "Job timed out after 5 minutes", timestamp: new Date().toISOString() });
+        } else if (pollResult.failed > 0) {
+          // Fetch per-lead failure details from Marketo
+          try {
+            const failData = await apiPost("/api/failures", { ...creds, importId });
+            if (failData.failures?.length > 0) {
+              failData.failures.forEach((f, fi) => {
+                newErrors.push({ id: `err_${Date.now()}_${i}_${fi}`, uploadId: logId, listName: file.name, batchIndex: i + 1, errorCode: "LEAD_IMPORT_FAILED", leadId: f.leadId, email: f.email, message: f.reason, timestamp: new Date().toISOString() });
+              });
+            } else {
+              newErrors.push({ id: `err_${Date.now()}_${i}`, uploadId: logId, listName: file.name, batchIndex: i + 1, errorCode: "PARTIAL_FAILURE", leadId: "", email: "", message: `${pollResult.failed} records failed in batch ${i + 1}`, timestamp: new Date().toISOString() });
+            }
+          } catch {
+            newErrors.push({ id: `err_${Date.now()}_${i}`, uploadId: logId, listName: file.name, batchIndex: i + 1, errorCode: "PARTIAL_FAILURE", leadId: "", email: "", message: `${pollResult.failed} records failed in batch ${i + 1}`, timestamp: new Date().toISOString() });
+          }
+        }
       }
 
       setProgress({ total: batches.length, done: i + 1, records: processed });
@@ -630,12 +641,26 @@ function ErrorLogs({ errors, onClear }) {
         ? <div style={{ ...card, color: T.neon, fontSize: 14, textAlign: "center", padding: "2rem" }}>✓ No errors. All clear.</div>
         : sorted.map(e => (
           <div key={e.id} style={{ ...card, marginBottom: 8, borderLeft: `3px solid ${T.danger}` }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 8, marginBottom: 8 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
               <div>
                 <p style={{ margin: 0, fontWeight: 600, fontSize: 14, color: T.danger }}>{e.errorCode}</p>
                 <p style={{ margin: "2px 0 0", fontSize: 12, color: T.muted }}>{e.listName} · Batch {e.batchIndex}</p>
               </div>
               <span style={{ fontSize: 12, color: T.muted }}>{new Date(e.timestamp).toLocaleString()}</span>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 8, marginBottom: 8 }}>
+              {e.leadId && (
+                <div style={{ background: "#0f0f13", borderRadius: 8, padding: "7px 12px" }}>
+                  <p style={{ margin: 0, fontSize: 11, color: T.muted, textTransform: "uppercase", letterSpacing: "0.05em" }}>Lead ID</p>
+                  <p style={{ margin: "2px 0 0", fontSize: 13, color: T.text }}>{e.leadId}</p>
+                </div>
+              )}
+              {e.email && (
+                <div style={{ background: "#0f0f13", borderRadius: 8, padding: "7px 12px" }}>
+                  <p style={{ margin: 0, fontSize: 11, color: T.muted, textTransform: "uppercase", letterSpacing: "0.05em" }}>Email</p>
+                  <p style={{ margin: "2px 0 0", fontSize: 13, color: T.text }}>{e.email}</p>
+                </div>
+              )}
             </div>
             <p style={{ margin: 0, fontSize: 13, color: T.text, background: "#0f0f13", borderRadius: 8, padding: "8px 12px" }}>{e.message}</p>
           </div>
