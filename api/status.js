@@ -10,7 +10,7 @@ export default async function handler(req, res) {
     const { restBase } = normalizeUrls(restUrl);
     const bulkBase = restBase.replace(/\/rest$/i, "");
     const response = await fetch(
-      `${bulkBase}/bulk/v1/program/${programId}/members/import/${importId}/status.json`,
+      `${bulkBase}/bulk/v1/program/members/import/${importId}/status.json`,
       { headers: { Authorization: `Bearer ${token}` } }
     );
     const text = await response.text();
