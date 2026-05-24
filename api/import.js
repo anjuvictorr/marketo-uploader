@@ -28,8 +28,9 @@ export default async function handler(req, res) {
     let data;
     try { data = JSON.parse(text); } catch { throw new Error(`Marketo returned non-JSON: ${text.slice(0, 200)}`); }
     if (!data.success) throw new Error(data.errors?.[0]?.message || "Import failed");
-    const importId = data.result?.[0]?.importId;
-    if (!importId) throw new Error("Marketo accepted the import but returned no importId");
+    console.log("Marketo import result:", JSON.stringify(data.result?.[0]));
+    const importId = data.result?.[0]?.batchId ?? data.result?.[0]?.importId;
+    if (!importId) throw new Error(`Marketo accepted the import but returned no id. Result: ${JSON.stringify(data.result?.[0])}`);
     res.json({ importId });
   } catch (err) {
     console.error("import error:", err.message);
