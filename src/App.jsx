@@ -14,8 +14,14 @@ const ACCENT = [T.orange, T.purple, T.yellow, T.teal, T.pink];
 
 // ─── STORAGE ──────────────────────────────────────────────────────────────────
 const ls = {
-  get: (k, fb) => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch { return fb; } },
-  set: (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+  get: (k, fb) => {
+    if (typeof window === "undefined") return fb;
+    try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch { return fb; }
+  },
+  set: (k, v) => {
+    if (typeof window === "undefined") return;
+    try { localStorage.setItem(k, JSON.stringify(v)); } catch { }
+  },
 };
 
 const DEFAULT_SETTINGS = {
@@ -131,7 +137,7 @@ function FieldMapping({ csvHeaders, marketoFields, mapping, onChange }) {
     const initial = {};
     csvHeaders.forEach(h => { initial[h] = autoMap(h, marketoFields); });
     onChange(initial);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // intentionally empty — run once on mount
 
   const unmapped = csvHeaders.filter(h => !mapping[h]);
