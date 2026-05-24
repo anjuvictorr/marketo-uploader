@@ -13,9 +13,13 @@ export default async function handler(req, res) {
       `${bulkBase}/bulk/v1/program/${programId}/members/import/${importId}/status.json`,
       { headers: { Authorization: `Bearer ${token}` } }
     );
-    const data = await response.json();
-    if (!data.success) throw new Error(data.errors?.[0]?.message || "Status check failed");
+    const text = await response.text();
+    console.log("Marketo status raw response:", text.slice(0, 500));
+    let data;
+    try { data = JSON.parse(text); } catch { throw new Error(`Non-JSON from Marketo: ${text.slice(0, 200)}`); }
+    if (!data.success) throw new Error(data.errors?.[0]?.message || `Status check failed: ${text.slice(0, 200)}`);
     const job = data.result?.[0];
+    console.log("Marketo status job:", JSON.stringify(job));
     res.json({ status: job?.status, numImported: job?.numImported || 0, numFailed: job?.numFailed || 0 });
   } catch (err) {
     res.status(500).json({ error: err.message });
