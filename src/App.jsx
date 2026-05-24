@@ -222,14 +222,16 @@ function Dashboard({ logs, errors }) {
 }
 
 // ─── UPLOAD ───────────────────────────────────────────────────────────────────
-const MEMBER_STATUSES = ["Member", "Attended", "Registered", "On List", "Invited", "Waitlisted", "No Show"];
+const FALLBACK_STATUSES = ["Member", "Attended", "Registered", "On List", "Invited", "Waitlisted", "No Show"];
 
 function UploadPanel({ settings, onLogEntry, onErrorEntry }) {
   const [step, setStep] = useState(1);
   const [programs, setPrograms] = useState([]);
   const [selectedProgram, setSelectedProgram] = useState("");
-  const [memberStatus, setMemberStatus] = useState("Member");
+  const [memberStatus, setMemberStatus] = useState(FALLBACK_STATUSES[0]);
   const [loadingPrograms, setLoadingPrograms] = useState(false);
+  const [memberStatuses, setMemberStatuses] = useState(FALLBACK_STATUSES);
+  const [loadingStatuses, setLoadingStatuses] = useState(false);
   const [file, setFile] = useState(null);
   const [csvData, setCsvData] = useState(null);
   const [marketoFields, setMarketoFields] = useState(COMMON_FIELDS);
@@ -254,6 +256,23 @@ function UploadPanel({ settings, onLogEntry, onErrorEntry }) {
       alert(`Could not fetch programs: ${err.message}`);
     } finally {
       setLoadingPrograms(false);
+    }
+  };
+
+  const fetchStatuses = async (programId) => {
+    const program = programs.find(p => String(p.id) === String(programId));
+    if (!program?.channel) return;
+    setLoadingStatuses(true);
+    try {
+      const data = await apiPost("/api/statuses", { ...getCreds(), channel: program.channel });
+      if (data.statuses?.length > 0) {
+        setMemberStatuses(data.statuses);
+        setMemberStatus(data.statuses[0]);
+      }
+    } catch {
+      // keep fallback statuses
+    } finally {
+      setLoadingStatuses(false);
     }
   };
 
@@ -455,12 +474,12 @@ function UploadPanel({ settings, onLogEntry, onErrorEntry }) {
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 16 }}>
           <div>
             <label style={lbl}>Marketo program</label>
-            <SearchDropdown options={programs} value={selectedProgram} onChange={setSelectedProgram} placeholder="Search and select a program..." disabled={programs.length === 0} />
+            <SearchDropdown options={programs} value={selectedProgram} onChange={(v) => { setSelectedProgram(v); fetchStatuses(v); }} placeholder="Search and select a program..." disabled={programs.length === 0} />
           </div>
           <div>
-            <label style={lbl}>Member status</label>
-            <select value={memberStatus} onChange={e => setMemberStatus(e.target.value)} style={inp}>
-              {MEMBER_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
+            <label style={lbl}>Member status {loadingStatuses && <span style={{ color: T.muted, fontWeight: 400 }}>loading...</span>}</label>
+            <select value={memberStatus} onChange={e => setMemberStatus(e.target.value)} style={inp} disabled={loadingStatuses}>
+              {memberStatuses.map(s => <option key={s} value={s}>{s}</option>)}
             </select>
           </div>
         </div>
