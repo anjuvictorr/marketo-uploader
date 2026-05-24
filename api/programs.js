@@ -1,4 +1,3 @@
-import fetch from "node-fetch";
 import { getToken, normalizeUrls, corsHeaders } from "./_marketo.js";
 
 export default async function handler(req, res) {
