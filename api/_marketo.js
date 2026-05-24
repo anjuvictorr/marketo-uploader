@@ -1,5 +1,3 @@
-import fetch from "node-fetch";
-
 export function normalizeUrls(restUrl) {
   const base = restUrl.trim().replace(/\/+$/, "");
   const identityBase = base.replace(/\/rest$/i, "/identity");

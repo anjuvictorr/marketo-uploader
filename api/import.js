@@ -1,5 +1,3 @@
-import FormData from "form-data";
-import fetch from "node-fetch";
 import { getToken, normalizeUrls, corsHeaders } from "./_marketo.js";
 
 export const config = { api: { bodyParser: { sizeLimit: "11mb" } } };
@@ -16,14 +14,14 @@ export default async function handler(req, res) {
     const token = await getToken(restUrl, clientId, clientSecret);
     const { restBase } = normalizeUrls(restUrl);
     const bulkBase = restBase.replace(/\/rest$/i, "");
-    const buf = Buffer.from(csvContent, "utf8");
+    // Use native FormData + Blob (Node 18 globals) — avoids form-data/node-fetch ESM incompatibility
     const form = new FormData();
     form.append("format", "csv");
     form.append("programMemberStatus", memberStatus);
-    form.append("file", buf, { filename: filename || "batch.csv", contentType: "text/csv" });
+    form.append("file", new Blob([csvContent], { type: "text/csv" }), filename || "batch.csv");
     const response = await fetch(`${bulkBase}/bulk/v1/program/${programId}/members/import.json`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${token}`, ...form.getHeaders() },
+      headers: { Authorization: `Bearer ${token}` },
       body: form,
     });
     const text = await response.text();
