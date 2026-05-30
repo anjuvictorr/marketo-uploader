@@ -53,8 +53,9 @@ async function apiPost(path, body) {
 // ─── COMPONENTS ───────────────────────────────────────────────────────────────
 function Badge({ status }) {
   const map = {
-    success: [T.neon, "#0f2a0f"], failed: [T.danger, "#2a0f0f"],
-    partial: [T.yellow, "#2a250f"], running: [T.teal, "#0f2a2a"], pending: [T.muted, "#1e1e2a"],
+    success: [T.neon, "#0f2a0f"], complete: [T.neon, "#0f2a0f"],
+    failed: [T.danger, "#2a0f0f"], partial: [T.yellow, "#2a250f"],
+    uploading: [T.teal, "#0f2a2a"], pending: [T.muted, "#1e1e2a"],
   };
   const [fg, bg] = map[status] || map.pending;
   return <span style={{ background: bg, color: fg, border: `1px solid ${fg}33`, fontSize: 11, padding: "3px 10px", borderRadius: 20, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em" }}>{status}</span>;
@@ -123,6 +124,8 @@ const COMMON_FIELDS = [
   { rest: "department", display: "Department" }, { rest: "numberOfEmployees", display: "Employees" },
 ];
 
+const FALLBACK_STATUSES = ["Member", "Attended", "Registered", "On List", "Invited", "Waitlisted", "No Show"];
+
 function autoMap(header, fields) {
   const h = header.toLowerCase().replace(/[\s_-]/g, "");
   return fields.find(f =>
@@ -132,13 +135,12 @@ function autoMap(header, fields) {
 }
 
 function FieldMapping({ csvHeaders, marketoFields, mapping, onChange }) {
-  // Auto-map on mount only
   useEffect(() => {
     const initial = {};
     csvHeaders.forEach(h => { initial[h] = autoMap(h, marketoFields); });
     onChange(initial);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // intentionally empty — run once on mount
+  }, []);
 
   const unmapped = csvHeaders.filter(h => !mapping[h]);
   const emailMapped = Object.values(mapping).includes("email");
@@ -179,7 +181,7 @@ function FieldMapping({ csvHeaders, marketoFields, mapping, onChange }) {
       </div>
       {unmapped.length > 0 && (
         <div style={{ background: "#2a1509", border: `1px solid ${T.coral}33`, borderRadius: 10, padding: "10px 14px", fontSize: 13, color: T.coral }}>
-          ⚠ {unmapped.length} column{unmapped.length > 1 ? "s" : ""} not mapped — they will be skipped. Map them above or leave to skip.
+          ⚠ {unmapped.length} column{unmapped.length > 1 ? "s" : ""} not mapped — they will be skipped.
         </div>
       )}
     </div>
@@ -189,7 +191,7 @@ function FieldMapping({ csvHeaders, marketoFields, mapping, onChange }) {
 // ─── DASHBOARD ────────────────────────────────────────────────────────────────
 function Dashboard({ logs, errors }) {
   const total = logs.length;
-  const success = logs.filter(l => l.status === "success").length;
+  const success = logs.filter(l => l.status === "success" || l.status === "complete").length;
   const failed = logs.filter(l => l.status === "failed").length;
   const processed = logs.reduce((a, l) => a + (l.processedRecords || 0), 0);
   const recent = [...logs].sort((a, b) => new Date(b.startedAt) - new Date(a.startedAt)).slice(0, 6);
@@ -228,25 +230,113 @@ function Dashboard({ logs, errors }) {
   );
 }
 
-// ─── UPLOAD ───────────────────────────────────────────────────────────────────
-const FALLBACK_STATUSES = ["Member", "Attended", "Registered", "On List", "Invited", "Waitlisted", "No Show"];
+// ─── UPLOAD QUEUE ─────────────────────────────────────────────────────────────
+function UploadQueue({ jobs, abortMap, onClearDone }) {
+  const active = jobs.filter(j => j.status === "uploading");
+  const done = jobs.filter(j => j.status !== "uploading");
 
-function UploadPanel({ settings, onLogEntry, onErrorEntry }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div>
+          <h2 style={{ margin: 0, fontSize: 22, fontWeight: 700, color: T.text }}>Upload Queue</h2>
+          <p style={{ margin: "4px 0 0", color: T.muted, fontSize: 14 }}>
+            {active.length > 0 ? `${active.length} active` : "No active uploads"}{done.length > 0 ? ` · ${done.length} completed` : ""}
+          </p>
+        </div>
+        {done.length > 0 && <button onClick={onClearDone} style={{ ...ghost, fontSize: 13 }}>Clear completed</button>}
+      </div>
+
+      {jobs.length === 0 && (
+        <div style={{ ...card, color: T.muted, fontSize: 14, textAlign: "center", padding: "3rem" }}>
+          No uploads yet. Go to Upload to start one.
+        </div>
+      )}
+
+      {active.length > 0 && (
+        <div>
+          <p style={{ margin: "0 0 10px", fontSize: 12, color: T.muted, textTransform: "uppercase", letterSpacing: "0.05em" }}>Active</p>
+          {active.map((job, i) => {
+            const pct = job.batchesTotal > 0 ? Math.round((job.batchesDone / job.batchesTotal) * 100) : 0;
+            return (
+              <div key={job.id} style={{ ...card, marginBottom: 10, borderLeft: `3px solid ${T.teal}` }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 8, marginBottom: 14 }}>
+                  <div>
+                    <p style={{ margin: 0, fontWeight: 600, fontSize: 15, color: T.text }}>{job.listName}</p>
+                    <p style={{ margin: "3px 0 0", fontSize: 12, color: T.muted }}>{job.programName} · {job.memberStatus}</p>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <span style={{ width: 8, height: 8, borderRadius: "50%", background: T.teal, display: "inline-block", animation: "pulse 1.5s infinite" }} />
+                    <Badge status="uploading" />
+                  </div>
+                </div>
+                <div style={{ marginBottom: 10 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: T.muted, marginBottom: 6 }}>
+                    <span>Batch {job.batchesDone} of {job.batchesTotal}</span>
+                    <span>{pct}% · {job.recordsImported.toLocaleString()} records imported</span>
+                  </div>
+                  <div style={{ height: 8, background: "#1e1e2a", borderRadius: 4, overflow: "hidden" }}>
+                    <div style={{ height: "100%", width: `${pct}%`, background: `linear-gradient(90deg, ${T.purple}, ${T.teal})`, borderRadius: 4, transition: "width 0.6s ease" }} />
+                  </div>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span style={{ fontSize: 12, color: T.muted }}>Started {new Date(job.startedAt).toLocaleTimeString()}</span>
+                  <button onClick={() => { abortMap.current[job.id] = true; }} style={{ ...btn(T.danger), padding: "6px 14px", fontSize: 12 }}>Cancel</button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {done.length > 0 && (
+        <div>
+          <p style={{ margin: "0 0 10px", fontSize: 12, color: T.muted, textTransform: "uppercase", letterSpacing: "0.05em" }}>Completed</p>
+          {done.map((job, i) => {
+            const duration = job.finishedAt ? Math.round((new Date(job.finishedAt) - new Date(job.startedAt)) / 1000) : null;
+            const accent = job.status === "complete" ? T.neon : job.status === "partial" ? T.yellow : T.danger;
+            return (
+              <div key={job.id} style={{ ...card, marginBottom: 8, borderLeft: `3px solid ${accent}` }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 8 }}>
+                  <div>
+                    <p style={{ margin: 0, fontWeight: 600, fontSize: 14, color: T.text }}>{job.listName}</p>
+                    <p style={{ margin: "3px 0 0", fontSize: 12, color: T.muted }}>{job.programName} · {job.memberStatus}</p>
+                  </div>
+                  <Badge status={job.status} />
+                </div>
+                <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginTop: 10, fontSize: 13, color: T.muted }}>
+                  <span>Records: <strong style={{ color: T.text }}>{job.recordsImported.toLocaleString()} / {job.totalRecords.toLocaleString()}</strong></span>
+                  <span>Batches: <strong style={{ color: T.text }}>{job.batchesDone} / {job.batchesTotal}</strong></span>
+                  {duration && <span>Duration: <strong style={{ color: T.text }}>{duration}s</strong></span>}
+                  <span>Started: <strong style={{ color: T.text }}>{new Date(job.startedAt).toLocaleTimeString()}</strong></span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <style>{`@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }`}</style>
+    </div>
+  );
+}
+
+// ─── UPLOAD PANEL (form only — upload runs at App level) ──────────────────────
+const MEMBER_STATUSES_DEFAULT = FALLBACK_STATUSES;
+
+function UploadPanel({ settings, onSubmit }) {
   const [step, setStep] = useState(1);
   const [programs, setPrograms] = useState([]);
   const [selectedProgram, setSelectedProgram] = useState("");
   const [memberStatus, setMemberStatus] = useState(FALLBACK_STATUSES[0]);
-  const [loadingPrograms, setLoadingPrograms] = useState(false);
   const [memberStatuses, setMemberStatuses] = useState(FALLBACK_STATUSES);
+  const [loadingPrograms, setLoadingPrograms] = useState(false);
   const [loadingStatuses, setLoadingStatuses] = useState(false);
   const [file, setFile] = useState(null);
   const [csvData, setCsvData] = useState(null);
   const [marketoFields, setMarketoFields] = useState(COMMON_FIELDS);
   const [mapping, setMapping] = useState({});
-  const [uploading, setUploading] = useState(false);
-  const [progress, setProgress] = useState(null);
-  const [uploadError, setUploadError] = useState("");
-  const abortRef = useRef(false);
+  const [submitError, setSubmitError] = useState("");
 
   const getCreds = useCallback(() => {
     const { restUrl, clientId, clientSecret } = settings;
@@ -277,7 +367,7 @@ function UploadPanel({ settings, onLogEntry, onErrorEntry }) {
         setMemberStatus(data.statuses[0]);
       }
     } catch {
-      // keep fallback statuses
+      // keep fallback
     } finally {
       setLoadingStatuses(false);
     }
@@ -321,154 +411,50 @@ function UploadPanel({ settings, onLogEntry, onErrorEntry }) {
     return out;
   };
 
-  const startUpload = async () => {
-    setUploadError("");
-    const { batchSize, intervalSec, retryAttempts, retryDelaySec } = settings;
-    abortRef.current = false;
-    setUploading(true);
-
-    const logId = `log_${Date.now()}`;
+  const handleSubmit = () => {
+    setSubmitError("");
     const mappedRows = csvData.rows.map(remapRow).filter(r => Object.keys(r).length > 0);
-
-    if (mappedRows.length === 0) {
-      setUploadError("No mapped fields — please map at least one CSV column to a Marketo field.");
-      setUploading(false);
-      return;
-    }
-    if (!Object.values(mapping).includes("email")) {
-      setUploadError("Email field is required. Go back to field mapping and map a column to 'email'.");
-      setUploading(false);
-      return;
-    }
-
-    const batches = [];
-    for (let i = 0; i < mappedRows.length; i += batchSize) {
-      batches.push(mappedRows.slice(i, i + batchSize));
-    }
+    if (mappedRows.length === 0) { setSubmitError("No mapped fields — map at least one CSV column."); return; }
+    if (!Object.values(mapping).includes("email")) { setSubmitError("Email field is required."); return; }
 
     const programName = programs.find(p => String(p.id) === String(selectedProgram))?.name || selectedProgram;
-    const logEntry = {
-      id: logId, listName: file.name, programName, programId: selectedProgram,
-      memberStatus, totalRecords: mappedRows.length, processedRecords: 0,
-      batchesTotal: batches.length, batchesDone: 0, status: "running",
-      startedAt: new Date().toISOString(), finishedAt: null,
-    };
 
-    setProgress({ total: batches.length, done: 0, records: 0 });
-    let processed = 0;
-    let hasError = false;
-    const newErrors = [];
-    const creds = getCreds();
+    onSubmit({
+      creds: getCreds(),
+      programId: selectedProgram,
+      programName,
+      memberStatus,
+      mappedRows,
+      filename: file.name,
+      batchSize: settings.batchSize,
+      intervalSec: settings.intervalSec,
+      retryAttempts: settings.retryAttempts,
+      retryDelaySec: settings.retryDelaySec,
+    });
 
-    for (let i = 0; i < batches.length; i++) {
-      if (abortRef.current) { hasError = true; break; }
-
-      let importId = null;
-      let batchError = null;
-
-      // Upload batch with retry
-      for (let attempt = 0; attempt <= retryAttempts; attempt++) {
-        try {
-          const headers = Object.keys(batches[i][0]);
-          const csvContent = [
-            headers.join(","),
-            ...batches[i].map(r => headers.map(h => `"${(r[h] || "").replace(/"/g, '""')}"`).join(",")),
-          ].join("\n");
-
-          const data = await apiPost("/api/import", {
-            ...creds,
-            programId: selectedProgram,
-            memberStatus,
-            csvContent,
-            filename: `batch_${i + 1}.csv`,
-          });
-
-          importId = data.importId;
-          batchError = null;
-          break;
-        } catch (err) {
-          batchError = err.message;
-          if (attempt < retryAttempts) await sleep(retryDelaySec * 1000 * (attempt + 1));
-        }
-      }
-
-      if (batchError || !importId) {
-        hasError = true;
-        newErrors.push({ id: `err_${Date.now()}_${i}`, uploadId: logId, listName: file.name, batchIndex: i + 1, errorCode: "BATCH_ERROR", message: batchError || "No importId returned", timestamp: new Date().toISOString() });
-        setProgress({ total: batches.length, done: i + 1, records: processed });
-        if (i < batches.length - 1) await sleep(intervalSec * 1000);
-        continue;
-      }
-
-      // Poll for job completion
-      let pollResult = { ok: false, imported: 0, failed: 0, timeout: true };
-      for (let p = 0; p < 30; p++) {
-        await sleep(10000);
-        try {
-          const statusData = await apiPost("/api/status", { ...creds, programId: selectedProgram, importId });
-          if (statusData.status === "Complete") {
-            pollResult = { ok: true, imported: statusData.numImported || 0, failed: statusData.numFailed || 0, timeout: false };
-            break;
-          }
-          if (statusData.status === "Failed") {
-            pollResult = { ok: false, imported: 0, failed: 0, timeout: false };
-            break;
-          }
-        } catch {
-          // keep polling
-        }
-      }
-
-      processed += pollResult.imported;
-      if (!pollResult.ok || pollResult.failed > 0) {
-        hasError = true;
-        if (pollResult.timeout) {
-          newErrors.push({ id: `err_${Date.now()}_${i}`, uploadId: logId, listName: file.name, batchIndex: i + 1, errorCode: "TIMEOUT", leadId: "", email: "", message: "Job timed out after 5 minutes", timestamp: new Date().toISOString() });
-        } else if (pollResult.failed > 0) {
-          // Fetch per-lead failure details from Marketo
-          try {
-            const failData = await apiPost("/api/failures", { ...creds, importId });
-            if (failData.failures?.length > 0) {
-              failData.failures.forEach((f, fi) => {
-                newErrors.push({ id: `err_${Date.now()}_${i}_${fi}`, uploadId: logId, listName: file.name, batchIndex: i + 1, errorCode: "LEAD_IMPORT_FAILED", leadId: f.leadId, email: f.email, message: f.reason, timestamp: new Date().toISOString() });
-              });
-            } else {
-              newErrors.push({ id: `err_${Date.now()}_${i}`, uploadId: logId, listName: file.name, batchIndex: i + 1, errorCode: "PARTIAL_FAILURE", leadId: "", email: "", message: `${pollResult.failed} records failed in batch ${i + 1}`, timestamp: new Date().toISOString() });
-            }
-          } catch {
-            newErrors.push({ id: `err_${Date.now()}_${i}`, uploadId: logId, listName: file.name, batchIndex: i + 1, errorCode: "PARTIAL_FAILURE", leadId: "", email: "", message: `${pollResult.failed} records failed in batch ${i + 1}`, timestamp: new Date().toISOString() });
-          }
-        }
-      }
-
-      setProgress({ total: batches.length, done: i + 1, records: processed });
-      if (i < batches.length - 1) await sleep(intervalSec * 1000);
-    }
-
-    logEntry.processedRecords = processed;
-    logEntry.batchesDone = batches.length;
-    logEntry.status = abortRef.current ? "failed" : hasError ? (processed > 0 ? "partial" : "failed") : "success";
-    logEntry.finishedAt = new Date().toISOString();
-    onLogEntry(logEntry);
-    if (newErrors.length) onErrorEntry(newErrors);
-    setUploading(false);
-    setProgress(null);
+    // Reset form immediately so user can queue another upload
+    reset();
   };
 
-  const reset = () => { setStep(1); setFile(null); setCsvData(null); setMapping({}); setSelectedProgram(""); setProgress(null); setUploadError(""); };
+  const reset = () => {
+    setStep(1); setFile(null); setCsvData(null); setMapping({});
+    setSelectedProgram(""); setSubmitError("");
+    setMemberStatuses(FALLBACK_STATUSES); setMemberStatus(FALLBACK_STATUSES[0]);
+  };
+
   const programSelected = programs.find(p => String(p.id) === String(selectedProgram));
-  const pct = progress ? Math.round((progress.done / progress.total) * 100) : 0;
+  const emailMapped = Object.values(mapping).includes("email");
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
       <div>
         <h2 style={{ margin: 0, fontSize: 22, fontWeight: 700, color: T.text }}>Upload list</h2>
-        <p style={{ margin: "4px 0 0", color: T.muted, fontSize: 14 }}>Map CSV columns to Marketo fields, then queue batches for import</p>
+        <p style={{ margin: "4px 0 0", color: T.muted, fontSize: 14 }}>Configure and queue a new upload — you can queue multiple lists at once</p>
       </div>
 
       {/* STEP INDICATORS */}
       <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-        {["Program", "CSV file", "Field mapping", "Upload"].map((s, i) => {
+        {["Program", "CSV file", "Field mapping", "Confirm"].map((s, i) => {
           const n = i + 1;
           const active = step === n;
           const done = step > n;
@@ -535,8 +521,8 @@ function UploadPanel({ settings, onLogEntry, onErrorEntry }) {
           <div style={{ marginTop: 16 }}>
             <button
               onClick={() => setStep(4)}
-              disabled={!Object.values(mapping).includes("email")}
-              style={{ ...btn(T.yellow), opacity: Object.values(mapping).includes("email") ? 1 : 0.4, cursor: Object.values(mapping).includes("email") ? "pointer" : "not-allowed" }}
+              disabled={!emailMapped}
+              style={{ ...btn(T.yellow), opacity: emailMapped ? 1 : 0.4, cursor: emailMapped ? "pointer" : "not-allowed" }}
             >
               Confirm mapping → Review upload
             </button>
@@ -547,7 +533,8 @@ function UploadPanel({ settings, onLogEntry, onErrorEntry }) {
       {/* STEP 4 */}
       {step >= 4 && (
         <div style={card}>
-          <p style={{ margin: "0 0 4px", fontWeight: 600, fontSize: 15, color: T.neon }}>Step 4 — Upload</p>
+          <p style={{ margin: "0 0 4px", fontWeight: 600, fontSize: 15, color: T.neon }}>Step 4 — Confirm & queue</p>
+          <p style={{ margin: "0 0 16px", fontSize: 13, color: T.muted }}>Review the details below, then add to queue. You can queue more uploads immediately after.</p>
           <div style={{ display: "flex", gap: 24, flexWrap: "wrap", marginBottom: 16, fontSize: 13, color: T.muted }}>
             <span>Program: <strong style={{ color: T.text }}>{programSelected?.name}</strong></span>
             <span>Status: <strong style={{ color: T.text }}>{memberStatus}</strong></span>
@@ -555,26 +542,14 @@ function UploadPanel({ settings, onLogEntry, onErrorEntry }) {
             <span>Batch size: <strong style={{ color: T.text }}>{settings.batchSize}</strong></span>
             <span>Mapped fields: <strong style={{ color: T.neon }}>{Object.values(mapping).filter(Boolean).length}</strong></span>
           </div>
-          {uploadError && (
+          {submitError && (
             <div style={{ marginBottom: 12, background: "#2a0f0f", border: `1px solid ${T.danger}33`, borderRadius: 10, padding: "10px 14px", fontSize: 13, color: T.danger }}>
-              ✗ {uploadError}
-            </div>
-          )}
-          {progress && (
-            <div style={{ marginBottom: 16 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: T.muted, marginBottom: 6 }}>
-                <span>Batch {progress.done} of {progress.total}</span>
-                <span>{pct}% · {progress.records.toLocaleString()} records processed</span>
-              </div>
-              <div style={{ height: 8, background: "#1e1e2a", borderRadius: 4, overflow: "hidden" }}>
-                <div style={{ height: "100%", width: `${pct}%`, background: `linear-gradient(90deg, ${T.purple}, ${T.orange})`, borderRadius: 4, transition: "width 0.4s" }} />
-              </div>
+              ✗ {submitError}
             </div>
           )}
           <div style={{ display: "flex", gap: 10 }}>
-            {!uploading && <button onClick={startUpload} style={btn(T.neon)}>🚀 Start upload</button>}
-            {uploading && <button onClick={() => { abortRef.current = true; }} style={btn(T.danger)}>Stop</button>}
-            {!uploading && <button onClick={reset} style={ghost}>Start over</button>}
+            <button onClick={handleSubmit} style={btn(T.neon)}>Add to queue →</button>
+            <button onClick={reset} style={ghost}>Start over</button>
           </div>
         </div>
       )}
@@ -685,7 +660,7 @@ function Settings({ settings, onChange }) {
     try {
       const { clientId, clientSecret, restUrl } = local;
       if (!clientId || !clientSecret || !restUrl) throw new Error("Fill in Client ID, Client Secret and REST URL first.");
-      const data = await apiPost("/api/auth", { clientId, clientSecret, restUrl });
+      await apiPost("/api/auth", { clientId, clientSecret, restUrl });
       setTestResult({ ok: true, msg: "Connected successfully." });
     } catch (err) {
       setTestResult({ ok: false, msg: err.message });
@@ -739,20 +714,24 @@ function Settings({ settings, onChange }) {
   );
 }
 
-// ─── APP ──────────────────────────────────────────────────────────────────────
+// ─── NAV ──────────────────────────────────────────────────────────────────────
 const NAV = [
   { id: "dashboard", icon: "⬡", label: "Dashboard" },
   { id: "upload", icon: "↑", label: "Upload" },
+  { id: "queue", icon: "▤", label: "Queue" },
   { id: "logs", icon: "≡", label: "Logs" },
   { id: "errors", icon: "⚠", label: "Errors" },
   { id: "settings", icon: "⚙", label: "Settings" },
 ];
 
+// ─── APP ──────────────────────────────────────────────────────────────────────
 export default function App() {
   const [tab, setTab] = useState("dashboard");
   const [settings, setSettings] = useState(() => ({ ...DEFAULT_SETTINGS, ...ls.get("mkto_settings", {}) }));
   const [logs, setLogs] = useState(() => ls.get("mkto_logs", []));
   const [errors, setErrors] = useState(() => ls.get("mkto_errors", []));
+  const [queue, setQueue] = useState([]);
+  const abortMap = useRef({});
 
   const addLog = useCallback((e) => setLogs(prev => {
     const u = [e, ...prev.filter(l => l.id !== e.id)];
@@ -766,6 +745,118 @@ export default function App() {
     return u;
   }), []);
 
+  const updateJob = useCallback((id, patch) => {
+    setQueue(prev => prev.map(j => j.id === id ? { ...j, ...patch } : j));
+  }, []);
+
+  const runUpload = useCallback(async (jobId, config) => {
+    const { creds, programId, programName, memberStatus, mappedRows, filename, batchSize, intervalSec, retryAttempts, retryDelaySec } = config;
+    const startedAt = new Date().toISOString();
+
+    const batches = [];
+    for (let i = 0; i < mappedRows.length; i += batchSize) batches.push(mappedRows.slice(i, i + batchSize));
+    updateJob(jobId, { batchesTotal: batches.length });
+
+    let processed = 0;
+    let hasError = false;
+    const newErrors = [];
+
+    for (let i = 0; i < batches.length; i++) {
+      if (abortMap.current[jobId]) { hasError = true; break; }
+      updateJob(jobId, { currentBatch: i + 1 });
+
+      let importId = null;
+      let batchError = null;
+
+      for (let attempt = 0; attempt <= retryAttempts; attempt++) {
+        try {
+          const headers = Object.keys(batches[i][0]);
+          const csvContent = [
+            headers.join(","),
+            ...batches[i].map(r => headers.map(h => `"${(r[h] || "").replace(/"/g, '""')}"`).join(",")),
+          ].join("\n");
+          const data = await apiPost("/api/import", { ...creds, programId, memberStatus, csvContent, filename: `batch_${i + 1}.csv` });
+          importId = data.importId;
+          batchError = null;
+          break;
+        } catch (err) {
+          batchError = err.message;
+          if (attempt < retryAttempts) await sleep(retryDelaySec * 1000 * (attempt + 1));
+        }
+      }
+
+      if (batchError || !importId) {
+        hasError = true;
+        newErrors.push({ id: `err_${Date.now()}_${i}`, uploadId: jobId, listName: filename, batchIndex: i + 1, errorCode: "BATCH_ERROR", leadId: "", email: "", message: batchError || "No importId returned", timestamp: new Date().toISOString() });
+        updateJob(jobId, { batchesDone: i + 1 });
+        if (i < batches.length - 1) await sleep(intervalSec * 1000);
+        continue;
+      }
+
+      let pollResult = { ok: false, imported: 0, failed: 0, timeout: true };
+      for (let p = 0; p < 30; p++) {
+        await sleep(10000);
+        try {
+          const statusData = await apiPost("/api/status", { ...creds, programId, importId });
+          if (statusData.status === "Complete") { pollResult = { ok: true, imported: statusData.numImported || 0, failed: statusData.numFailed || 0, timeout: false }; break; }
+          if (statusData.status === "Failed") { pollResult = { ok: false, imported: 0, failed: 0, timeout: false }; break; }
+        } catch { /* keep polling */ }
+      }
+
+      processed += pollResult.imported;
+      if (!pollResult.ok || pollResult.failed > 0) {
+        hasError = true;
+        if (pollResult.timeout) {
+          newErrors.push({ id: `err_${Date.now()}_${i}`, uploadId: jobId, listName: filename, batchIndex: i + 1, errorCode: "TIMEOUT", leadId: "", email: "", message: "Job timed out after 5 minutes", timestamp: new Date().toISOString() });
+        } else if (pollResult.failed > 0) {
+          try {
+            const failData = await apiPost("/api/failures", { ...creds, importId });
+            if (failData.failures?.length > 0) {
+              failData.failures.forEach((f, fi) => newErrors.push({ id: `err_${Date.now()}_${i}_${fi}`, uploadId: jobId, listName: filename, batchIndex: i + 1, errorCode: "LEAD_IMPORT_FAILED", leadId: f.leadId, email: f.email, message: f.reason, timestamp: new Date().toISOString() }));
+            } else {
+              newErrors.push({ id: `err_${Date.now()}_${i}`, uploadId: jobId, listName: filename, batchIndex: i + 1, errorCode: "PARTIAL_FAILURE", leadId: "", email: "", message: `${pollResult.failed} records failed in batch ${i + 1}`, timestamp: new Date().toISOString() });
+            }
+          } catch {
+            newErrors.push({ id: `err_${Date.now()}_${i}`, uploadId: jobId, listName: filename, batchIndex: i + 1, errorCode: "PARTIAL_FAILURE", leadId: "", email: "", message: `${pollResult.failed} records failed in batch ${i + 1}`, timestamp: new Date().toISOString() });
+          }
+        }
+      }
+
+      updateJob(jobId, { batchesDone: i + 1, recordsImported: processed });
+      if (i < batches.length - 1) await sleep(intervalSec * 1000);
+    }
+
+    const finalStatus = abortMap.current[jobId] ? "failed" : hasError ? (processed > 0 ? "partial" : "failed") : "complete";
+    const finishedAt = new Date().toISOString();
+    updateJob(jobId, { status: finalStatus, finishedAt, recordsImported: processed });
+    delete abortMap.current[jobId];
+
+    addLog({ id: jobId, listName: filename, programName, programId, memberStatus, totalRecords: mappedRows.length, processedRecords: processed, batchesTotal: batches.length, batchesDone: batches.length, status: finalStatus, startedAt, finishedAt });
+    if (newErrors.length) addErrors(newErrors);
+  }, [updateJob, addLog, addErrors]);
+
+  const submitUpload = useCallback((config) => {
+    const jobId = `job_${Date.now()}`;
+    const batchesTotal = Math.ceil(config.mappedRows.length / config.batchSize);
+    abortMap.current[jobId] = false;
+    setQueue(prev => [{
+      id: jobId,
+      listName: config.filename,
+      programName: config.programName,
+      memberStatus: config.memberStatus,
+      totalRecords: config.mappedRows.length,
+      batchesTotal,
+      batchesDone: 0,
+      recordsImported: 0,
+      currentBatch: 0,
+      status: "uploading",
+      startedAt: new Date().toISOString(),
+      finishedAt: null,
+    }, ...prev]);
+    setTab("queue");
+    runUpload(jobId, config);
+  }, [runUpload]);
+
   return (
     <div style={{ display: "flex", minHeight: "100vh", background: T.bg, fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif", color: T.text }}>
       <nav style={{ width: 220, background: T.sidebar, borderRight: `1px solid ${T.cardBorder}`, padding: "1.5rem 0", display: "flex", flexDirection: "column", flexShrink: 0 }}>
@@ -773,21 +864,29 @@ export default function App() {
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <div style={{ width: 32, height: 32, borderRadius: 8, background: `linear-gradient(135deg, ${T.orange}, ${T.purple})`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16 }}>⬆</div>
             <div>
-              <p style={{ margin: 0, fontWeight: 700, fontSize: 14, color: T.text }}>List Upload</p>
-              <p style={{ margin: 0, fontSize: 11, color: T.muted }}>Marketo manager</p>
+              <p style={{ margin: 0, fontWeight: 700, fontSize: 14, color: T.text }}>Luna</p>
+              <p style={{ margin: 0, fontSize: 11, color: T.muted }}>List Upload Manager</p>
             </div>
           </div>
         </div>
-        {NAV.map(item => (
-          <button key={item.id} onClick={() => setTab(item.id)} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 1.25rem", fontSize: 14, border: "none", background: tab === item.id ? `${T.orange}18` : "transparent", color: tab === item.id ? T.orange : T.muted, borderLeft: tab === item.id ? `3px solid ${T.orange}` : "3px solid transparent", cursor: "pointer", textAlign: "left", width: "100%", fontWeight: tab === item.id ? 600 : 400 }}>
-            <span style={{ fontSize: 16 }}>{item.icon}</span>
-            {item.label}
-          </button>
-        ))}
+        {NAV.map(item => {
+          const isQueue = item.id === "queue";
+          const activeJobs = isQueue ? queue.filter(j => j.status === "uploading").length : 0;
+          return (
+            <button key={item.id} onClick={() => setTab(item.id)} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 1.25rem", fontSize: 14, border: "none", background: tab === item.id ? `${T.orange}18` : "transparent", color: tab === item.id ? T.orange : T.muted, borderLeft: tab === item.id ? `3px solid ${T.orange}` : "3px solid transparent", cursor: "pointer", textAlign: "left", width: "100%", fontWeight: tab === item.id ? 600 : 400 }}>
+              <span style={{ fontSize: 16 }}>{item.icon}</span>
+              {item.label}
+              {activeJobs > 0 && (
+                <span style={{ marginLeft: "auto", background: T.teal, color: "#0f0f13", fontSize: 11, fontWeight: 700, padding: "2px 7px", borderRadius: 10 }}>{activeJobs}</span>
+              )}
+            </button>
+          );
+        })}
       </nav>
       <main style={{ flex: 1, padding: "2rem", overflowY: "auto", maxWidth: 900 }}>
         {tab === "dashboard" && <Dashboard logs={logs} errors={errors} />}
-        {tab === "upload" && <UploadPanel settings={settings} onLogEntry={addLog} onErrorEntry={addErrors} />}
+        {tab === "upload" && <UploadPanel settings={settings} onSubmit={submitUpload} />}
+        {tab === "queue" && <UploadQueue jobs={queue} abortMap={abortMap} onClearDone={() => setQueue(prev => prev.filter(j => j.status === "uploading"))} />}
         {tab === "logs" && <UploadLogs logs={logs} onClear={() => { setLogs([]); ls.set("mkto_logs", []); }} />}
         {tab === "errors" && <ErrorLogs errors={errors} onClear={() => { setErrors([]); ls.set("mkto_errors", []); }} />}
         {tab === "settings" && <Settings settings={settings} onChange={setSettings} />}
