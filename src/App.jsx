@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
-const API_URL = "https://marketo-uploader.vercel.app";
+const API_URL = "https://list-upload-normalisation-assistant.vercel.app";
 
 // ─── THEME ────────────────────────────────────────────────────────────────────
 const T = {
