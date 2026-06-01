@@ -27,8 +27,9 @@ const ls = {
 const DEFAULT_SETTINGS = {
   clientId: "", clientSecret: "", munchkinId: "", restUrl: "",
   batchSize: 300, intervalSec: 20, retryAttempts: 3, retryDelaySec: 30,
-  sanctionedCountries: ["Cuba", "Iran", "North Korea", "Russia", "Syria", "Belarus", "Myanmar"],
-  picklistRules: [], // [{ csvColumn: "Person Source", allowedValues: ["Web", "Event", "Partner"] }]
+  sanctionedCountries: [],
+  picklistRules: [],
+  requiredImportFields: ["email"], // Marketo REST field names that must be mapped before import
 };
 
 // ─── STYLES ───────────────────────────────────────────────────────────────────
@@ -136,7 +137,7 @@ function autoMap(header, fields) {
   )?.rest || "";
 }
 
-function FieldMapping({ csvHeaders, marketoFields, mapping, onChange }) {
+function FieldMapping({ csvHeaders, marketoFields, mapping, onChange, requiredFields = ["email"] }) {
   useEffect(() => {
     const initial = {};
     csvHeaders.forEach(h => { initial[h] = autoMap(h, marketoFields); });
@@ -144,8 +145,9 @@ function FieldMapping({ csvHeaders, marketoFields, mapping, onChange }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const mappedValues = Object.values(mapping);
   const unmapped = csvHeaders.filter(h => !mapping[h]);
-  const emailMapped = Object.values(mapping).includes("email");
+  const missingRequired = requiredFields.filter(f => !mappedValues.includes(f));
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -157,9 +159,10 @@ function FieldMapping({ csvHeaders, marketoFields, mapping, onChange }) {
           </span>
         )}
       </div>
-      {!emailMapped && (
+      {missingRequired.length > 0 && (
         <div style={{ background: "#2a0f0f", border: `1px solid ${T.danger}66`, borderRadius: 10, padding: "10px 14px", fontSize: 13, color: T.danger, fontWeight: 600 }}>
-          Email is required — map a column to the <strong>email</strong> field to continue. Marketo uses email to match existing records and avoid duplicates.
+          Required fields not mapped: <strong>{missingRequired.join(", ")}</strong> — these must be mapped to proceed.
+          {missingRequired.includes("email") && <span style={{ fontWeight: 400, display: "block", marginTop: 4 }}>Email is used to match existing records and avoid duplicates.</span>}
         </div>
       )}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 24px 1fr", gap: "8px 12px", alignItems: "center" }}>
@@ -169,12 +172,12 @@ function FieldMapping({ csvHeaders, marketoFields, mapping, onChange }) {
         {csvHeaders.map(h => {
           const mapped = mapping[h] || "";
           const isUnmapped = !mapped;
-          const isEmail = mapped === "email";
+          const isRequired = requiredFields.includes(mapped);
           return [
-            <div key={`csv-${h}`} style={{ background: "#0f0f13", border: `1px solid ${isEmail ? T.neon + "88" : isUnmapped ? T.coral + "66" : T.cardBorder}`, borderRadius: 8, padding: "9px 12px", fontSize: 13, color: isUnmapped ? T.coral : T.text }}>{h}</div>,
+            <div key={`csv-${h}`} style={{ background: "#0f0f13", border: `1px solid ${isRequired ? T.neon + "88" : isUnmapped ? T.coral + "66" : T.cardBorder}`, borderRadius: 8, padding: "9px 12px", fontSize: 13, color: isUnmapped ? T.coral : T.text }}>{h}</div>,
             <div key={`arr-${h}`} style={{ textAlign: "center", color: mapped ? T.neon : T.coral, fontSize: 16 }}>{mapped ? "→" : "⚠"}</div>,
             <select key={`sel-${h}`} value={mapped} onChange={e => onChange({ ...mapping, [h]: e.target.value })}
-              style={{ ...inp, border: `1px solid ${isEmail ? T.neon + "88" : isUnmapped ? T.coral + "66" : T.cardBorder}`, color: mapped ? T.text : T.muted }}>
+              style={{ ...inp, border: `1px solid ${isRequired ? T.neon + "88" : isUnmapped ? T.coral + "66" : T.cardBorder}`, color: mapped ? T.text : T.muted }}>
               <option value="">— skip this field —</option>
               {marketoFields.map(f => <option key={f.rest} value={f.rest}>{f.display} ({f.rest})</option>)}
             </select>,
@@ -427,7 +430,8 @@ function UploadPanel({ settings, onSubmit, preloadedCsv, onPreloadConsumed }) {
     setSubmitError("");
     const mappedRows = csvData.rows.map(remapRow).filter(r => Object.keys(r).length > 0);
     if (mappedRows.length === 0) { setSubmitError("No mapped fields — map at least one CSV column."); return; }
-    if (!Object.values(mapping).includes("email")) { setSubmitError("Email field is required."); return; }
+    const missing = requiredFields.filter(f => !Object.values(mapping).includes(f));
+    if (missing.length > 0) { setSubmitError(`Required fields not mapped: ${missing.join(", ")}`); return; }
 
     const programName = programs.find(p => String(p.id) === String(selectedProgram))?.name || selectedProgram;
 
@@ -442,6 +446,7 @@ function UploadPanel({ settings, onSubmit, preloadedCsv, onPreloadConsumed }) {
       intervalSec: settings.intervalSec,
       retryAttempts: settings.retryAttempts,
       retryDelaySec: settings.retryDelaySec,
+      sanctionedCountries: settings.sanctionedCountries || [],
     });
 
     // Reset form immediately so user can queue another upload
@@ -455,7 +460,9 @@ function UploadPanel({ settings, onSubmit, preloadedCsv, onPreloadConsumed }) {
   };
 
   const programSelected = programs.find(p => String(p.id) === String(selectedProgram));
-  const emailMapped = Object.values(mapping).includes("email");
+  const requiredFields = settings.requiredImportFields?.length ? settings.requiredImportFields : ["email"];
+  const mappedValues = Object.values(mapping);
+  const allRequiredMapped = requiredFields.every(f => mappedValues.includes(f));
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
@@ -529,12 +536,12 @@ function UploadPanel({ settings, onSubmit, preloadedCsv, onPreloadConsumed }) {
         <div style={card}>
           <p style={{ margin: "0 0 4px", fontWeight: 600, fontSize: 15, color: T.yellow }}>Step 3 — Map fields</p>
           <p style={{ margin: "0 0 16px", fontSize: 13, color: T.muted }}>Auto-matched where possible. Fix any flagged columns.</p>
-          <FieldMapping csvHeaders={csvData.headers} marketoFields={marketoFields} mapping={mapping} onChange={setMapping} />
+          <FieldMapping csvHeaders={csvData.headers} marketoFields={marketoFields} mapping={mapping} onChange={setMapping} requiredFields={requiredFields} />
           <div style={{ marginTop: 16 }}>
             <button
               onClick={() => setStep(4)}
-              disabled={!emailMapped}
-              style={{ ...btn(T.yellow), opacity: emailMapped ? 1 : 0.4, cursor: emailMapped ? "pointer" : "not-allowed" }}
+              disabled={!allRequiredMapped}
+              style={{ ...btn(T.yellow), opacity: allRequiredMapped ? 1 : 0.4, cursor: allRequiredMapped ? "pointer" : "not-allowed" }}
             >
               Confirm mapping → Review upload
             </button>
@@ -724,10 +731,29 @@ function Settings({ settings, onChange }) {
         <p style={{ margin: "0 0 4px", fontWeight: 600, fontSize: 15, color: T.pink }}>Data rules</p>
         <p style={{ margin: "0 0 16px", fontSize: 13, color: T.muted }}>Applied during normalization. Flagged rows are highlighted and can be excluded before upload.</p>
 
+        {/* Required import fields */}
+        <div style={{ marginBottom: 20 }}>
+          <label style={lbl}>Required fields during import</label>
+          <p style={{ margin: "0 0 8px", fontSize: 12, color: T.muted }}>Marketo REST field names that must be mapped before an upload can proceed. One per line. <strong style={{ color: T.text }}>email</strong> is always required and cannot be removed.</p>
+          <textarea
+            value={(local.requiredImportFields || ["email"]).filter(f => f !== "email").join("\n")}
+            onChange={e => {
+              const extra = e.target.value.split("\n").map(v => v.trim()).filter(Boolean);
+              setLocal(l => ({ ...l, requiredImportFields: ["email", ...extra] }));
+            }}
+            rows={3}
+            style={{ ...inp, fontFamily: "monospace", fontSize: 13, resize: "vertical" }}
+            placeholder={"leadSource\npersonSource"}
+          />
+          <p style={{ margin: "4px 0 0", fontSize: 12, color: T.muted }}>
+            Currently required: <strong style={{ color: T.text }}>{(local.requiredImportFields || ["email"]).join(", ")}</strong>
+          </p>
+        </div>
+
         {/* Sanctioned countries */}
         <div style={{ marginBottom: 20 }}>
           <label style={lbl}>Sanctioned / excluded countries</label>
-          <p style={{ margin: "0 0 8px", fontSize: 12, color: T.muted }}>One country per line. Records matching these will be flagged and auto-excluded in Normalize.</p>
+          <p style={{ margin: "0 0 8px", fontSize: 12, color: T.muted }}>One country per line. Records matching these are flagged in Normalize and silently dropped during import.</p>
           <textarea
             value={(local.sanctionedCountries || []).join("\n")}
             onChange={e => setLocal(l => ({ ...l, sanctionedCountries: e.target.value.split("\n").map(v => v.trim()).filter(Boolean) }))}
@@ -1362,12 +1388,22 @@ export default function App() {
   }, []);
 
   const runUpload = useCallback(async (jobId, config) => {
-    const { creds, programId, programName, memberStatus, mappedRows, filename, batchSize, intervalSec, retryAttempts, retryDelaySec } = config;
+    const { creds, programId, programName, memberStatus, mappedRows, filename, batchSize, intervalSec, retryAttempts, retryDelaySec, sanctionedCountries = [] } = config;
     const startedAt = new Date().toISOString();
 
+    // Filter out sanctioned country records before batching
+    const sanctionedSet = new Set(sanctionedCountries.map(c => c.toLowerCase().trim()));
+    const safeRows = sanctionedSet.size > 0
+      ? mappedRows.filter(r => {
+          const country = (r.country || r.billingCountry || "").toLowerCase().trim();
+          return !country || !sanctionedSet.has(country);
+        })
+      : mappedRows;
+    const sanctionedDropped = mappedRows.length - safeRows.length;
+
     const batches = [];
-    for (let i = 0; i < mappedRows.length; i += batchSize) batches.push(mappedRows.slice(i, i + batchSize));
-    updateJob(jobId, { batchesTotal: batches.length });
+    for (let i = 0; i < safeRows.length; i += batchSize) batches.push(safeRows.slice(i, i + batchSize));
+    updateJob(jobId, { batchesTotal: batches.length, sanctionedDropped });
 
     let processed = 0;
     let hasError = false;
