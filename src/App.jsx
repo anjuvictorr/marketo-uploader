@@ -27,6 +27,8 @@ const ls = {
 const DEFAULT_SETTINGS = {
   clientId: "", clientSecret: "", munchkinId: "", restUrl: "",
   batchSize: 300, intervalSec: 20, retryAttempts: 3, retryDelaySec: 30,
+  sanctionedCountries: ["Cuba", "Iran", "North Korea", "Russia", "Syria", "Belarus", "Myanmar"],
+  picklistRules: [], // [{ csvColumn: "Person Source", allowedValues: ["Web", "Event", "Partner"] }]
 };
 
 // ─── STYLES ───────────────────────────────────────────────────────────────────
@@ -324,7 +326,7 @@ function UploadQueue({ jobs, abortMap, onClearDone }) {
 // ─── UPLOAD PANEL (form only — upload runs at App level) ──────────────────────
 const MEMBER_STATUSES_DEFAULT = FALLBACK_STATUSES;
 
-function UploadPanel({ settings, onSubmit }) {
+function UploadPanel({ settings, onSubmit, preloadedCsv, onPreloadConsumed }) {
   const [step, setStep] = useState(1);
   const [programs, setPrograms] = useState([]);
   const [selectedProgram, setSelectedProgram] = useState("");
@@ -343,6 +345,16 @@ function UploadPanel({ settings, onSubmit }) {
     if (!restUrl || !clientId || !clientSecret) throw new Error("Credentials not configured. Go to Settings.");
     return { restUrl, clientId, clientSecret };
   }, [settings]);
+
+  useEffect(() => {
+    if (!preloadedCsv) return;
+    setCsvData(preloadedCsv);
+    setFile({ name: preloadedCsv.filename || "normalized.csv" });
+    fetchMarketoFields();
+    setStep(3);
+    onPreloadConsumed?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [preloadedCsv]);
 
   const fetchPrograms = async () => {
     setLoadingPrograms(true);
@@ -707,9 +719,607 @@ function Settings({ settings, onChange }) {
           <strong style={{ color: T.text }}>Marketo limits:</strong> 100 requests / 20 sec · 10 concurrent calls · Bulk queue: max 10 jobs · Max file: 10 MB
         </div>
       </div>
+      {/* ── Data Rules ─────────────────────────────────────────────────── */}
+      <div style={{ ...card, borderTop: `3px solid ${T.pink}` }}>
+        <p style={{ margin: "0 0 4px", fontWeight: 600, fontSize: 15, color: T.pink }}>Data rules</p>
+        <p style={{ margin: "0 0 16px", fontSize: 13, color: T.muted }}>Applied during normalization. Flagged rows are highlighted and can be excluded before upload.</p>
+
+        {/* Sanctioned countries */}
+        <div style={{ marginBottom: 20 }}>
+          <label style={lbl}>Sanctioned / excluded countries</label>
+          <p style={{ margin: "0 0 8px", fontSize: 12, color: T.muted }}>One country per line. Records matching these will be flagged and auto-excluded in Normalize.</p>
+          <textarea
+            value={(local.sanctionedCountries || []).join("\n")}
+            onChange={e => setLocal(l => ({ ...l, sanctionedCountries: e.target.value.split("\n").map(v => v.trim()).filter(Boolean) }))}
+            rows={5}
+            style={{ ...inp, fontFamily: "monospace", fontSize: 13, resize: "vertical" }}
+            placeholder={"Cuba\nIran\nNorth Korea\nRussia\nSyria"}
+          />
+          <p style={{ margin: "4px 0 0", fontSize: 12, color: T.muted }}>{(local.sanctionedCountries || []).length} countries configured</p>
+        </div>
+
+        {/* Picklist rules */}
+        <div>
+          <label style={lbl}>Restricted picklist fields</label>
+          <p style={{ margin: "0 0 10px", fontSize: 12, color: T.muted }}>
+            Define fields with fixed allowed values (e.g. Person Source). Records with values outside the list are flagged in Normalize. Column name must match your CSV header exactly.
+          </p>
+          {(local.picklistRules || []).map((rule, i) => (
+            <div key={i} style={{ background: "#0f0f13", borderRadius: 10, padding: "12px 14px", marginBottom: 10, display: "flex", flexDirection: "column", gap: 10 }}>
+              <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+                <div style={{ flex: 1 }}>
+                  <label style={lbl}>CSV column name</label>
+                  <input
+                    value={rule.csvColumn}
+                    onChange={e => setLocal(l => { const r = [...l.picklistRules]; r[i] = { ...r[i], csvColumn: e.target.value }; return { ...l, picklistRules: r }; })}
+                    placeholder="e.g. Person Source"
+                    style={inp}
+                  />
+                </div>
+                <button
+                  onClick={() => setLocal(l => { const r = l.picklistRules.filter((_, j) => j !== i); return { ...l, picklistRules: r }; })}
+                  style={{ ...ghost, padding: "8px 12px", marginTop: 20, color: T.danger, borderColor: T.danger + "44", fontSize: 12 }}
+                >Remove</button>
+              </div>
+              <div>
+                <label style={lbl}>Allowed values (one per line)</label>
+                <textarea
+                  value={(rule.allowedValues || []).join("\n")}
+                  onChange={e => setLocal(l => { const r = [...l.picklistRules]; r[i] = { ...r[i], allowedValues: e.target.value.split("\n").map(v => v.trim()).filter(Boolean) }; return { ...l, picklistRules: r }; })}
+                  rows={4}
+                  style={{ ...inp, fontFamily: "monospace", fontSize: 13, resize: "vertical" }}
+                  placeholder={"Web\nEvent\nPartner\nPaid Media"}
+                />
+              </div>
+            </div>
+          ))}
+          <button
+            onClick={() => setLocal(l => ({ ...l, picklistRules: [...(l.picklistRules || []), { csvColumn: "", allowedValues: [] }] }))}
+            style={{ ...ghost, fontSize: 13 }}
+          >+ Add picklist rule</button>
+        </div>
+      </div>
+
       <button onClick={save} style={{ ...btn(saved ? T.neon : T.orange), alignSelf: "flex-start", color: saved ? "#0f0f13" : "#fff" }}>
         {saved ? "✓ Saved" : "Save settings"}
       </button>
+    </div>
+  );
+}
+
+// ─── NORMALIZE ────────────────────────────────────────────────────────────────
+const normHeader = (h) => h.toLowerCase().replace(/[\s_-]/g, "");
+
+const PERSONAL_DOMAINS = new Set([
+  "gmail.com", "yahoo.com", "hotmail.com", "outlook.com", "icloud.com", "aol.com",
+  "protonmail.com", "yahoo.co.in", "rediffmail.com", "live.com", "msn.com", "ymail.com", "mail.com",
+]);
+
+const ROLE_PREFIXES = [
+  "info", "support", "hello", "contact", "admin", "sales", "marketing", "team", "help", "billing",
+  "noreply", "no-reply", "enquiries", "enquiry", "hr", "careers", "press", "media", "legal", "finance",
+  "accounts", "reception", "office",
+];
+
+const IN_STATE_ABBREV = {
+  AN: "Andaman and Nicobar Islands", AP: "Andhra Pradesh", AR: "Arunachal Pradesh",
+  AS: "Assam", BR: "Bihar", CH: "Chandigarh", CT: "Chhattisgarh", DN: "Dadra and Nagar Haveli",
+  DD: "Daman and Diu", DL: "Delhi", GA: "Goa", GJ: "Gujarat", HR: "Haryana",
+  HP: "Himachal Pradesh", JK: "Jammu and Kashmir", JH: "Jharkhand", KA: "Karnataka",
+  KL: "Kerala", LA: "Ladakh", LD: "Lakshadweep", MP: "Madhya Pradesh", MH: "Maharashtra",
+  MN: "Manipur", ML: "Meghalaya", MZ: "Mizoram", NL: "Nagaland", OR: "Odisha",
+  PY: "Puducherry", PB: "Punjab", RJ: "Rajasthan", SK: "Sikkim", TN: "Tamil Nadu",
+  TS: "Telangana", TR: "Tripura", UP: "Uttar Pradesh", UK: "Uttarakhand", WB: "West Bengal",
+};
+
+const US_STATE_ABBREV = {
+  CA: "California", NY: "New York", TX: "Texas", FL: "Florida", IL: "Illinois", WA: "Washington",
+  MA: "Massachusetts", CO: "Colorado", GA: "Georgia", VA: "Virginia", NC: "North Carolina",
+  NJ: "New Jersey", AZ: "Arizona", OH: "Ohio", PA: "Pennsylvania", MI: "Michigan", MN: "Minnesota",
+  OR: "Oregon", TN: "Tennessee", MO: "Missouri", MD: "Maryland", WI: "Wisconsin", CT: "Connecticut",
+  NV: "Nevada", IN: "Indiana", UT: "Utah", KY: "Kentucky", SC: "South Carolina", AL: "Alabama",
+  LA: "Louisiana", OK: "Oklahoma", IA: "Iowa", KS: "Kansas", AR: "Arkansas", MS: "Mississippi",
+  NE: "Nebraska", NM: "New Mexico", ID: "Idaho", HI: "Hawaii", NH: "New Hampshire", ME: "Maine",
+  RI: "Rhode Island", MT: "Montana", DE: "Delaware", SD: "South Dakota", ND: "North Dakota",
+  AK: "Alaska", VT: "Vermont", WY: "Wyoming", DC: "District of Columbia",
+};
+
+function findCol(headers, matchers) {
+  return headers.find(h => matchers.includes(normHeader(h))) || null;
+}
+
+function toProperCase(str) {
+  if (!str) return str;
+  return str.split(/(\s+|-)/).map(part => {
+    if (!part || part === " " || part === "-") return part;
+    return part.charAt(0).toUpperCase() + part.slice(1).toLowerCase();
+  }).join("");
+}
+
+function sanitizeNameValue(val) {
+  const sanitized = val.replace(/[^a-zA-ZÀ-ÖØ-öø-ÿ\s\-']/g, "");
+  return sanitized === "" ? val : sanitized;
+}
+
+function isRoleBasedEmail(email) {
+  const local = email.split("@")[0]?.toLowerCase() || "";
+  return ROLE_PREFIXES.some(p => local === p || local.startsWith(p));
+}
+
+function normalizeCountry(val) {
+  const key = val.trim().replace(/\./g, "").toLowerCase().replace(/\s+/g, "");
+  const aliases = {
+    us: "United States", usa: "United States", unitedstates: "United States",
+    unitedstatesofamerica: "United States",
+    uk: "United Kingdom", england: "United Kingdom", britain: "United Kingdom", greatbritain: "United Kingdom",
+    uae: "United Arab Emirates", unitedarabemirates: "United Arab Emirates",
+    in: "India",
+    ir: "Ireland", ireland: "Ireland",
+    ca: "Canada", canada: "Canada",
+    au: "Australia", australia: "Australia",
+    de: "Germany", germany: "Germany",
+    fr: "France", france: "France",
+    sg: "Singapore", singapore: "Singapore",
+    jp: "Japan", japan: "Japan",
+  };
+  if (aliases[key]) return aliases[key];
+  const upper = val.trim().toUpperCase();
+  if (upper === "US" || upper === "USA" || upper === "U.S.A.") return "United States";
+  if (upper === "UK" || upper === "U.K.") return "United Kingdom";
+  if (upper === "UAE" || upper === "U.A.E.") return "United Arab Emirates";
+  if (upper === "IN") return "India";
+  return val;
+}
+
+// Minimum digit lengths for a valid number by country (excluding country code)
+const MIN_PHONE_DIGITS = { default: 7, IN: 10, US: 10, CA: 10, GB: 10, IE: 9, AU: 9 };
+
+function normalizePhone(val, country = "") {
+  const v = val.trim();
+  if (!v) return "";
+  const hasPlus = v.startsWith("+");
+  const digitStr = v.replace(/\D/g, "");
+
+  // Determine country code context
+  const c = country.toLowerCase();
+  const isIndia = c === "india" || c === "in";
+  const isIreland = c === "ireland" || c === "ie";
+  const isUK = c === "united kingdom" || c === "uk" || c === "gb";
+  const isCanada = c === "canada" || c === "ca";
+  const isAustralia = c === "australia" || c === "au";
+
+  // Already has +, keep as-is if valid length, else clear
+  if (hasPlus) {
+    return digitStr.length >= 7 ? "+" + digitStr : "";
+  }
+
+  // India: expect 10-digit mobile number, prepend +91
+  if (isIndia) {
+    const local = digitStr.startsWith("91") && digitStr.length === 12 ? digitStr.slice(2) : digitStr;
+    if (local.length === 10) return "+91" + local;
+    return ""; // incomplete — clear
+  }
+
+  // Ireland: expect 9-digit number, prepend +353
+  if (isIreland) {
+    if (digitStr.startsWith("353") && digitStr.length >= 12) return "+" + digitStr;
+    const local = digitStr.startsWith("0") ? digitStr.slice(1) : digitStr;
+    if (local.length >= 9) return "+353" + local;
+    return "";
+  }
+
+  // UK: starts with 0, replace with +44
+  if (isUK) {
+    if (digitStr.startsWith("44") && digitStr.length >= 12) return "+" + digitStr;
+    const local = digitStr.startsWith("0") ? digitStr.slice(1) : digitStr;
+    if (local.length >= 10) return "+44" + local;
+    return "";
+  }
+
+  // Canada / US: expect 10 digits
+  if (isCanada) {
+    if (digitStr.length === 10) return "+1" + digitStr;
+    if (digitStr.length === 11 && digitStr.startsWith("1")) return "+" + digitStr;
+    return ""; // incomplete — clear
+  }
+
+  // Australia
+  if (isAustralia) {
+    if (digitStr.startsWith("61") && digitStr.length >= 11) return "+" + digitStr;
+    const local = digitStr.startsWith("0") ? digitStr.slice(1) : digitStr;
+    if (local.length >= 9) return "+61" + local;
+    return "";
+  }
+
+  // No country context — generic rules
+  if (digitStr.length >= 11 && !digitStr.startsWith("00")) return "+" + digitStr;
+  if (digitStr.startsWith("0") && digitStr.length > 1) return "+44" + digitStr.slice(1);
+  if (digitStr.length === 10) return "+1" + digitStr;
+  if (digitStr.length < 7) return ""; // too short to be valid — clear
+  return digitStr;
+}
+
+function parseCsvFile(text) {
+  const lines = text.trim().split("\n").filter(Boolean);
+  const headers = lines[0].split(",").map(h => h.trim().replace(/^"|"$/g, ""));
+  const rows = lines.slice(1).map(line => {
+    const vals = line.split(",").map(v => v.trim().replace(/^"|"$/g, ""));
+    const obj = {};
+    headers.forEach((h, i) => { obj[h] = vals[i] || ""; });
+    return obj;
+  });
+  return { headers, rows };
+}
+
+function runCleanEngine(headers, rows, sanctionedCountries = [], picklistRules = []) {
+  const emailCol = findCol(headers, ["email", "emailaddress", "emailid", "workemailaddress", "workemail", "emailaddress"]);
+  const firstCol = findCol(headers, ["firstname"]);
+  const lastCol = findCol(headers, ["lastname"]);
+  const fullCol = findCol(headers, ["fullname", "name"]);
+  const hasSeparateNames = firstCol || lastCol;
+  const phoneCol = findCol(headers, ["phone", "mobile", "mobilephone", "phonenumber"]);
+  const countryCol = findCol(headers, ["country"]);
+  const stateCol = findCol(headers, ["state"]);
+  const sanctionedSet = new Set(sanctionedCountries.map(c => c.toLowerCase().trim()));
+
+  let outHeaders = [...headers];
+  let firstNameCol = firstCol;
+  let lastNameCol = lastCol;
+
+  if (fullCol && !hasSeparateNames) {
+    if (!firstNameCol) {
+      firstNameCol = "First Name";
+      if (!outHeaders.includes(firstNameCol)) outHeaders.push(firstNameCol);
+    }
+    if (!lastNameCol) {
+      lastNameCol = "Last Name";
+      if (!outHeaders.includes(lastNameCol)) outHeaders.push(lastNameCol);
+    }
+  }
+
+  const cleanedRows = [];
+  const meta = [];
+
+  rows.forEach((origRow) => {
+    const row = { ...origRow };
+    const flags = { personal: false, roleBased: false, emptyEmail: false, missingLastName: false, sanctioned: false, picklistViolations: [] };
+    const modified = new Set();
+    let nameSplit = false;
+
+    if (emailCol) {
+      const raw = (origRow[emailCol] || "").trim();
+      const lowered = raw.toLowerCase();
+      if (!lowered) flags.emptyEmail = true;
+      if (lowered !== raw) { row[emailCol] = lowered; modified.add(emailCol); }
+      else row[emailCol] = lowered;
+      if (lowered) {
+        const domain = lowered.split("@")[1] || "";
+        if (PERSONAL_DOMAINS.has(domain)) flags.personal = true;
+        if (isRoleBasedEmail(lowered)) flags.roleBased = true;
+      }
+    }
+
+    if (fullCol && !hasSeparateNames) {
+      const full = (origRow[fullCol] || "").trim();
+      if (full) {
+        const spaceIdx = full.indexOf(" ");
+        let first, last;
+        if (spaceIdx === -1) {
+          first = full;
+          last = full;
+          nameSplit = true;
+        } else {
+          first = full.slice(0, spaceIdx);
+          last = full.slice(spaceIdx + 1).trim() || full;
+          nameSplit = true;
+        }
+        const properFirst = sanitizeNameValue(toProperCase(first));
+        const properLast = sanitizeNameValue(toProperCase(last));
+        if (row[firstNameCol] !== properFirst) { row[firstNameCol] = properFirst; modified.add(firstNameCol); }
+        if (row[lastNameCol] !== properLast) { row[lastNameCol] = properLast; modified.add(lastNameCol); }
+      }
+    }
+
+    const nameCols = [firstCol, lastCol, firstNameCol, lastNameCol].filter(Boolean);
+    const uniqueNameCols = [...new Set(nameCols)];
+    uniqueNameCols.forEach(col => {
+      if (col === fullCol && !hasSeparateNames) return;
+      const v = (row[col] || "").trim();
+      if (!v) return;
+      const proper = sanitizeNameValue(toProperCase(v));
+      if (proper !== v) { row[col] = proper; modified.add(col); }
+      else row[col] = proper;
+    });
+
+    // Normalize country first so phone + state logic can use the resolved value
+    if (countryCol && origRow[countryCol]) {
+      const raw = origRow[countryCol].trim();
+      const mapped = normalizeCountry(raw);
+      if (mapped !== raw) { row[countryCol] = mapped; modified.add(countryCol); }
+      else row[countryCol] = mapped;
+    }
+
+    if (phoneCol && origRow[phoneCol]) {
+      const countryVal = countryCol ? (row[countryCol] || "").trim() : "";
+      const normalized = normalizePhone(origRow[phoneCol], countryVal);
+      if (normalized !== origRow[phoneCol]) { row[phoneCol] = normalized; modified.add(phoneCol); }
+      else row[phoneCol] = normalized;
+    }
+
+    if (stateCol && origRow[stateCol]) {
+      const countryVal = countryCol ? (row[countryCol] || "").trim() : "";
+      const isIndia = countryVal === "India";
+      const isUS = !countryVal || countryVal === "United States";
+      const raw = origRow[stateCol].trim();
+      const upper = raw.toUpperCase();
+      if (isIndia) {
+        const expanded = IN_STATE_ABBREV[upper];
+        if (expanded && expanded !== raw) { row[stateCol] = expanded; modified.add(stateCol); }
+      } else if (isUS) {
+        const expanded = US_STATE_ABBREV[upper];
+        if (expanded && expanded !== raw) { row[stateCol] = expanded; modified.add(stateCol); }
+      }
+    }
+
+    // Sanctioned country check — after country normalization
+    if (countryCol) {
+      const countryVal = (row[countryCol] || "").trim().toLowerCase();
+      if (countryVal && sanctionedSet.has(countryVal)) flags.sanctioned = true;
+    }
+
+    // Picklist rules — flag rows where a configured field has a value not in the allowed list
+    picklistRules.forEach(rule => {
+      if (!rule.csvColumn || !rule.allowedValues?.length) return;
+      const col = headers.find(h => h === rule.csvColumn);
+      if (!col) return;
+      const val = (row[col] || "").trim();
+      if (!val) return; // blank is not a violation — handle separately if needed
+      const allowed = rule.allowedValues.map(v => v.trim().toLowerCase());
+      if (!allowed.includes(val.toLowerCase())) {
+        flags.picklistViolations.push({ field: col, value: val, allowed: rule.allowedValues });
+      }
+    });
+
+    // Flag rows missing a last name — mandatory in Marketo, needs enrichment
+    if (lastNameCol && !(row[lastNameCol] || "").trim()) flags.missingLastName = true;
+
+    outHeaders.forEach(h => {
+      if (!(h in row)) row[h] = origRow[h] || "";
+    });
+
+    cleanedRows.push(row);
+    meta.push({ flags, modified: [...modified], nameSplit });
+  });
+
+  return { headers: outHeaders, rows: cleanedRows, originalRows: rows, meta };
+}
+
+function computeSummary(originalRows, cleanedRows, meta) {
+  let rowsModified = 0;
+  let personalCount = 0;
+  let roleCount = 0;
+  let emptyCount = 0;
+  let namesSplit = 0;
+  let fieldsCorrected = 0;
+  let missingLastNameCount = 0;
+  let sanctionedCount = 0;
+  let picklistViolationCount = 0;
+
+  meta.forEach((m, i) => {
+    if (m.flags.personal) personalCount++;
+    if (m.flags.roleBased) roleCount++;
+    if (m.flags.emptyEmail) emptyCount++;
+    if (m.flags.missingLastName) missingLastNameCount++;
+    if (m.flags.sanctioned) sanctionedCount++;
+    if (m.flags.picklistViolations?.length > 0) picklistViolationCount++;
+    if (m.nameSplit) namesSplit++;
+    fieldsCorrected += m.modified.length;
+    const orig = originalRows[i];
+    const clean = cleanedRows[i];
+    const changed = m.modified.length > 0 || Object.keys(clean).some(k => clean[k] !== orig[k]);
+    if (changed) rowsModified++;
+  });
+
+  return { total: cleanedRows.length, rowsModified, personalCount, roleCount, emptyCount, namesSplit, fieldsCorrected, missingLastNameCount, sanctionedCount, picklistViolationCount };
+}
+
+function rowsToCsv(headers, rows) {
+  return [
+    headers.join(","),
+    ...rows.map(row => headers.map(h => `"${(row[h] || "").replace(/"/g, '""')}"`).join(",")),
+  ].join("\n");
+}
+
+function FilterToggle({ label, checked, onChange, color }) {
+  return (
+    <label style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer", fontSize: 14, color: T.text }}>
+      <span style={{
+        width: 40, height: 22, borderRadius: 11, background: checked ? (color || T.orange) : T.cardBorder,
+        position: "relative", transition: "background 0.2s", flexShrink: 0,
+      }}>
+        <span style={{
+          position: "absolute", top: 3, left: checked ? 21 : 3, width: 16, height: 16,
+          borderRadius: "50%", background: "#fff", transition: "left 0.2s",
+        }} />
+      </span>
+      <input type="checkbox" checked={checked} onChange={e => onChange(e.target.checked)} style={{ display: "none" }} />
+      {label}
+    </label>
+  );
+}
+
+function NormalizePanel({ onProceedToUpload, settings }) {
+  const [filename, setFilename] = useState("");
+  const [parsed, setParsed] = useState(null);
+  const [removePersonal, setRemovePersonal] = useState(false);
+  const [removeRoleBased, setRemoveRoleBased] = useState(false)
+  const [removeSanctioned, setRemoveSanctioned] = useState(true);;
+  const [removeEmptyEmail, setRemoveEmptyEmail] = useState(true);
+
+  const handleFile = (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    setFilename(f.name);
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const { headers, rows } = parseCsvFile(ev.target.result);
+      const result = runCleanEngine(headers, rows, settings?.sanctionedCountries || [], settings?.picklistRules || []);
+      setParsed(result);
+    };
+    reader.readAsText(f);
+  };
+
+  if (!parsed) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
+        <div>
+          <h2 style={{ margin: 0, fontSize: 22, fontWeight: 700, color: T.text }}>Normalize</h2>
+          <p style={{ margin: "4px 0 0", color: T.muted, fontSize: 14 }}>Clean and standardize your CSV before upload</p>
+        </div>
+        <div style={{ ...card, borderTop: `3px solid ${T.teal}` }}>
+          <p style={{ margin: "0 0 4px", fontWeight: 600, fontSize: 15, color: T.teal }}>Upload CSV</p>
+          <p style={{ margin: "0 0 16px", fontSize: 13, color: T.muted }}>First row must be column headers. Cleaning runs automatically on upload.</p>
+          <input type="file" accept=".csv" onChange={handleFile} style={{ fontSize: 14, color: T.text }} />
+        </div>
+      </div>
+    );
+  }
+
+  const { headers, rows: cleanedRows, originalRows, meta } = parsed;
+  const summary = computeSummary(originalRows, cleanedRows, meta);
+
+  const filteredIndices = cleanedRows.map((_, i) => i).filter(i => {
+    const f = meta[i].flags;
+    if (removePersonal && f.personal) return false;
+    if (removeRoleBased && f.roleBased) return false;
+    if (removeEmptyEmail && f.emptyEmail) return false;
+    if (removeSanctioned && f.sanctioned) return false;
+    return true;
+  });
+
+  const filteredRows = filteredIndices.map(i => cleanedRows[i]);
+  const filteredMeta = filteredIndices.map(i => meta[i]);
+  const filteredOriginal = filteredIndices.map(i => originalRows[i]);
+
+  const downloadCsv = () => {
+    const csv = rowsToCsv(headers, filteredRows);
+    const base = filename.replace(/\.csv$/i, "") || "export";
+    const outName = `${base}_normalized.csv`;
+    const blob = new Blob([csv], { type: "text/csv" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = outName;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
+
+  const statBadge = (label, count, color) => count > 0 ? (
+    <span style={{ background: `${color}22`, color, border: `1px solid ${color}44`, fontSize: 12, padding: "4px 10px", borderRadius: 20, fontWeight: 600 }}>
+      {label}: {count}
+    </span>
+  ) : null;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
+      <div>
+        <h2 style={{ margin: 0, fontSize: 22, fontWeight: 700, color: T.text }}>Normalize</h2>
+        <p style={{ margin: "4px 0 0", color: T.muted, fontSize: 14 }}>
+          {filename} · {summary.total.toLocaleString()} rows cleaned
+        </p>
+      </div>
+
+      <div style={{ ...card, borderTop: `3px solid ${T.purple}` }}>
+        <p style={{ margin: "0 0 12px", fontWeight: 600, fontSize: 15, color: T.purple }}>Summary</p>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 12, marginBottom: 14 }}>
+          <Metric label="Total rows" value={summary.total} color={T.purple} />
+          <Metric label="Rows modified" value={summary.rowsModified} color={T.teal} />
+          <Metric label="Fields corrected" value={summary.fieldsCorrected} color={T.neon} />
+        </div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+          {statBadge("Personal emails", summary.personalCount, T.orange)}
+          {statBadge("Role-based emails", summary.roleCount, T.yellow)}
+          {statBadge("Empty emails", summary.emptyCount, T.danger)}
+          {statBadge("Names split", summary.namesSplit, T.teal)}
+          {statBadge("Missing last name", summary.missingLastNameCount, T.pink)}
+          {statBadge("Sanctioned countries", summary.sanctionedCount, T.danger)}
+          {statBadge("Picklist violations", summary.picklistViolationCount, T.coral)}
+        </div>
+      </div>
+
+      <div style={card}>
+        <p style={{ margin: "0 0 12px", fontWeight: 600, fontSize: 15, color: T.text }}>Export filters</p>
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <FilterToggle label="Remove rows with personal emails" checked={removePersonal} onChange={setRemovePersonal} color={T.orange} />
+          <FilterToggle label="Remove rows with role-based emails" checked={removeRoleBased} onChange={setRemoveRoleBased} color={T.yellow} />
+          <FilterToggle label="Remove rows with empty emails" checked={removeEmptyEmail} onChange={setRemoveEmptyEmail} color={T.danger} />
+          {summary.sanctionedCount > 0 && <FilterToggle label={`Remove sanctioned country records (${summary.sanctionedCount})`} checked={removeSanctioned} onChange={setRemoveSanctioned} color={T.danger} />}
+        </div>
+        <p style={{ margin: "12px 0 0", fontSize: 13, color: T.muted }}>
+          Showing {filteredRows.length.toLocaleString()} of {summary.total.toLocaleString()} rows after filters
+        </p>
+      </div>
+
+      <div style={card}>
+        <p style={{ margin: "0 0 12px", fontSize: 13, color: T.muted }}>
+          {filteredRows.length.toLocaleString()} rows · modified cells highlighted
+        </p>
+        <div style={{ overflowX: "auto", overflowY: "auto", maxHeight: 400, borderRadius: 10, border: `1px solid ${T.cardBorder}` }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+            <thead>
+              <tr>
+                <th style={{ position: "sticky", top: 0, background: T.card, padding: "8px 10px", textAlign: "left", color: T.muted, fontSize: 11, textTransform: "uppercase", borderBottom: `1px solid ${T.cardBorder}` }}>Flags</th>
+                {headers.map(h => (
+                  <th key={h} style={{ position: "sticky", top: 0, background: T.card, padding: "8px 10px", textAlign: "left", color: T.muted, fontSize: 11, textTransform: "uppercase", borderBottom: `1px solid ${T.cardBorder}`, whiteSpace: "nowrap" }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {filteredRows.map((row, ri) => {
+                const m = filteredMeta[ri];
+                const orig = filteredOriginal[ri];
+                return (
+                  <tr key={ri}>
+                    <td style={{ padding: "6px 10px", borderBottom: `1px solid ${T.cardBorder}33`, verticalAlign: "top" }}>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                        {m.flags.personal && <span style={{ fontSize: 10, padding: "2px 6px", borderRadius: 8, background: `${T.orange}22`, color: T.orange, fontWeight: 600 }}>Personal</span>}
+                        {m.flags.roleBased && <span style={{ fontSize: 10, padding: "2px 6px", borderRadius: 8, background: `${T.yellow}22`, color: T.yellow, fontWeight: 600 }}>Role-Based</span>}
+                        {m.flags.emptyEmail && <span style={{ fontSize: 10, padding: "2px 6px", borderRadius: 8, background: `${T.danger}22`, color: T.danger, fontWeight: 600 }}>Empty Email</span>}
+                        {m.flags.missingLastName && <span style={{ fontSize: 10, padding: "2px 6px", borderRadius: 8, background: `${T.pink}22`, color: T.pink, fontWeight: 600 }}>No Last Name</span>}
+                        {m.flags.sanctioned && <span style={{ fontSize: 10, padding: "2px 6px", borderRadius: 8, background: `${T.danger}33`, color: T.danger, fontWeight: 600 }}>Sanctioned</span>}
+                        {m.flags.picklistViolations?.map((v, vi) => (
+                          <span key={vi} title={`Allowed: ${v.allowed.join(", ")}`} style={{ fontSize: 10, padding: "2px 6px", borderRadius: 8, background: `${T.coral}22`, color: T.coral, fontWeight: 600 }}>
+                            {v.field}: "{v.value}"
+                          </span>
+                        ))}
+                      </div>
+                    </td>
+                    {headers.map(h => {
+                      const modified = m.modified.includes(h) || (orig[h] || "") !== (row[h] || "");
+                      return (
+                        <td key={h} style={{
+                          padding: "6px 10px", borderBottom: `1px solid ${T.cardBorder}33`, color: T.text,
+                          background: modified ? `${T.teal}26` : "transparent", whiteSpace: "nowrap", maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis",
+                        }}>{row[h] || ""}</td>
+                      );
+                    })}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+        <button onClick={downloadCsv} style={ghost}>Download cleaned CSV</button>
+        <button
+          onClick={() => onProceedToUpload({ headers, rows: filteredRows, filename: filename.replace(/\.csv$/i, "") + "_normalized.csv" })}
+          style={btn(T.orange)}
+        >
+          Proceed to Upload →
+        </button>
+        <button onClick={() => { setParsed(null); setFilename(""); }} style={{ ...ghost, marginLeft: "auto" }}>Upload different file</button>
+      </div>
     </div>
   );
 }
@@ -718,6 +1328,7 @@ function Settings({ settings, onChange }) {
 const NAV = [
   { id: "dashboard", icon: "⬡", label: "Dashboard" },
   { id: "upload", icon: "↑", label: "Upload" },
+  { id: "normalize", icon: "✦", label: "Normalize" },
   { id: "queue", icon: "▤", label: "Queue" },
   { id: "logs", icon: "≡", label: "Logs" },
   { id: "errors", icon: "⚠", label: "Errors" },
@@ -727,6 +1338,7 @@ const NAV = [
 // ─── APP ──────────────────────────────────────────────────────────────────────
 export default function App() {
   const [tab, setTab] = useState("dashboard");
+  const [preloadedCsv, setPreloadedCsv] = useState(null);
   const [settings, setSettings] = useState(() => ({ ...DEFAULT_SETTINGS, ...ls.get("mkto_settings", {}) }));
   const [logs, setLogs] = useState(() => ls.get("mkto_logs", []));
   const [errors, setErrors] = useState(() => ls.get("mkto_errors", []));
@@ -885,7 +1497,8 @@ export default function App() {
       </nav>
       <main style={{ flex: 1, padding: "2rem", overflowY: "auto", maxWidth: 900 }}>
         {tab === "dashboard" && <Dashboard logs={logs} errors={errors} />}
-        {tab === "upload" && <UploadPanel settings={settings} onSubmit={submitUpload} />}
+        {tab === "upload" && <UploadPanel settings={settings} onSubmit={submitUpload} preloadedCsv={preloadedCsv} onPreloadConsumed={() => setPreloadedCsv(null)} />}
+        {tab === "normalize" && <NormalizePanel settings={settings} onProceedToUpload={(cleanedData) => { setPreloadedCsv(cleanedData); setTab("upload"); }} />}
         {tab === "queue" && <UploadQueue jobs={queue} abortMap={abortMap} onClearDone={() => setQueue(prev => prev.filter(j => j.status === "uploading"))} />}
         {tab === "logs" && <UploadLogs logs={logs} onClear={() => { setLogs([]); ls.set("mkto_logs", []); }} />}
         {tab === "errors" && <ErrorLogs errors={errors} onClear={() => { setErrors([]); ls.set("mkto_errors", []); }} />}
